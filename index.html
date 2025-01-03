@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Overlay VAST Player + Skip, Mute, ClickThrough</title>
+  <style>
+    /* Скидаємо відступи, на весь екран */
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #000;
+    }
+
+    /* Основне відео */
+    #mainVideo {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;  
+      background: #000;
+      display: block;
+    }
+
+    /* Прозорий оверлей, що блокує взаємодію з основним відео */
+    #overlay {
+      position: absolute;
+      top: 0; 
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0);
+      z-index: 999;
+      cursor: pointer;
+    }
+
+    /* Рекламне відео */
+    .ad-video {
+      position: absolute;
+      top: 0; 
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #000;
+      z-index: 1000; 
+    }
+
+    /* Прозорий «клік-оверлей» над рекламним відео */
+    .click-through-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0); /* цілком прозорий */
+      z-index: 1001; 
+      cursor: pointer;
+    }
+
+    /* Кнопка "Skip" */
+    .skip-button {
+      position: absolute;
+      bottom: 20px;   
+      right: 20px;    
+      padding: 10px 15px;
+      background-color: rgba(0,0,0,0.7);
+      color: #fff;
+      font-weight: bold;
+      border: 1px solid #999;
+      border-radius: 5px;
+      cursor: not-allowed;
+      opacity: 0.7;
+      z-index: 1002; /* ВИЩЕ, ніж click-through-оверлей */
+    }
+    /* Коли кнопка Skip стає активною */
+    .skip-button.active {
+      cursor: pointer;
+      opacity: 1;
+    }
+
+    /* Кнопка Mute */
+    .mute-button {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      padding: 10px 15px;
+      background-color: rgba(0,0,0,0.7);
+      color: #fff;
+      font-weight: bold;
+      border: 1px solid #999;
+      border-radius: 5px;
+      cursor: pointer;
+      opacity: 0.8;
+      z-index: 1002; /* Так само вище за click-through */
+    }
+  </style>
+</head>
+<body>
+  <!-- Основне відео -->
+  <video 
+    id="mainVideo" 
+    src="http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
+    controls>
+  </video>
+  
+  <!-- Прозорий оверлей (спочатку блокує дії з основним відео) -->
+  <div id="overlay"></div>
+
+  <script>
+    // Посилання на VAST
+    const vastUrl   = 'VAST.xml';
+
+    // Основний відео-елемент та оверлей
+    const mainVideo = document.getElementById('mainVideo');
+    const overlay   = document.getElementById('overlay');
+
+    // Змінні для збереження даних із VAST
+    let adUrl = null;         // URL рекламного відео
+    let clickThroughUrl = null; // Посилання «клік»
+    let skipDelay = 15;       // Час до можливості пропустити
+
+    // Флаг, щоб реклама не запускалася повторно
+    let adStarted = false;
+
+    // 1) Завантаження VAST до завчасно
+    fetch(vastUrl)
+      .then(response => response.text())
+      .then(xmlString => {
+        const parser  = new DOMParser();
+        const vastXml = parser.parseFromString(xmlString, 'text/xml');
+        
+        // 1.1) Зчитуємо URL відео (MediaFile)
+        const mediaFileNode = vastXml.querySelector('MediaFile');
+        if (mediaFileNode) {
+          adUrl = mediaFileNode.textContent.trim();
+        } else {
+          console.error('Не знайдено тег <MediaFile> у VAST.');
+        }
+        
+        // 1.2) Зчитуємо ClickThrough, якщо є
+        const clickThroughNode = vastXml.querySelector('ClickThrough');
+        if(clickThroughNode) {
+          clickThroughUrl = clickThroughNode.textContent.trim();
+        }
+
+        // 1.3) Зчитуємо час до skip (skipoffset) з AdParameters (або з іншого місця)
+        const adParameters = vastXml.querySelector('AdParameters');
+        if (adParameters && adParameters.hasAttribute('skipoffset')) {
+          const val = parseInt(adParameters.getAttribute('skipoffset'), 10);
+          skipDelay = isNaN(val) ? 15 : val;
+        }
+      })
+      .catch(err => {
+        console.error('Помилка завантаження VAST:', err);
+      });
+
+    // 2) Клік по прозорому оверлею (для запуску реклами)
+    overlay.addEventListener('click', () => {
+      if (adStarted) return; // якщо вже почали – ігноруємо
+      adStarted = true;
+
+      // Ставимо основне відео на паузу
+      mainVideo.pause();
+
+      // Якщо немає adUrl – немає реклами. Прибираємо оверлей, робимо основне відео доступним
+      if (!adUrl) {
+        overlay.remove();
+        return;
+      }
+
+      // Створюємо рекламне відео
+      const adVideo = document.createElement('video');
+      adVideo.classList.add('ad-video');
+      adVideo.src = adUrl;
+      adVideo.autoplay = true; 
+      adVideo.controls = false;  
+      adVideo.muted = false;    
+      adVideo.playsInline = true;
+      document.body.appendChild(adVideo);
+
+      // Створюємо прозорий оверлей для ClickThrough
+      // (покриватиме все рекламне відео, щоб клік вів на link)
+      let clickOverlay = null;
+      if (clickThroughUrl) {
+        clickOverlay = document.createElement('div');
+        clickOverlay.classList.add('click-through-overlay');
+        document.body.appendChild(clickOverlay);
+
+        // При кліку відкриваємо посилання
+        // (у новій вкладці)  
+        clickOverlay.addEventListener('click', () => {
+          window.open(clickThroughUrl, '_blank');
+        });
+      }
+
+      // Створюємо кнопку Skip
+      const skipBtn = document.createElement('div');
+      skipBtn.classList.add('skip-button');
+      skipBtn.textContent = `Пропустити (${skipDelay})`;
+      document.body.appendChild(skipBtn);
+
+      // Створюємо кнопку Mute
+      const muteBtn = document.createElement('div');
+      muteBtn.classList.add('mute-button');
+      muteBtn.textContent = 'Mute';
+      document.body.appendChild(muteBtn);
+
+      // Лічильник для Skip
+      let timeLeft = skipDelay;
+      const intervalId = setInterval(() => {
+        timeLeft--;
+        skipBtn.textContent = `Пропустити (${timeLeft})`;
+
+        if(timeLeft <= 0) {
+          clearInterval(intervalId);
+          skipBtn.textContent = 'Пропустити';
+          skipBtn.classList.add('active');
+          skipBtn.style.cursor = 'pointer';
+        }
+      }, 1000);
+
+      // Клік по Skip
+      skipBtn.addEventListener('click', () => {
+        // Якщо кнопка не активна — не даємо пропустити
+        if (!skipBtn.classList.contains('active')) return;
+
+        removeAdElements(adVideo, skipBtn, muteBtn, clickOverlay);
+        overlay.remove();
+        mainVideo.play().catch(e => console.error(e));
+      });
+
+      // Клік по Mute
+      muteBtn.addEventListener('click', () => {
+        if (!adVideo.muted) {
+          adVideo.muted = true;
+          muteBtn.textContent = 'Unmute';
+        } else {
+          adVideo.muted = false;
+          muteBtn.textContent = 'Mute';
+        }
+      });
+
+      // Коли реклама дограється до кінця
+      adVideo.addEventListener('ended', () => {
+        removeAdElements(adVideo, skipBtn, muteBtn, clickOverlay);
+        overlay.remove();
+        mainVideo.play().catch(e => console.error(e));
+      });
+    });
+
+    /**
+     * Прибираємо всі елементи, пов'язані з рекламою
+     */
+    function removeAdElements(adVideoEl, skipBtnEl, muteBtnEl, clickOverlayEl) {
+      if (adVideoEl && document.body.contains(adVideoEl)) {
+        document.body.removeChild(adVideoEl);
+      }
+      if (skipBtnEl && document.body.contains(skipBtnEl)) {
+        document.body.removeChild(skipBtnEl);
+      }
+      if (muteBtnEl && document.body.contains(muteBtnEl)) {
+        document.body.removeChild(muteBtnEl);
+      }
+      if (clickOverlayEl && document.body.contains(clickOverlayEl)) {
+        document.body.removeChild(clickOverlayEl);
+      }
+    }
+  </script>
+</body>
+</html>
